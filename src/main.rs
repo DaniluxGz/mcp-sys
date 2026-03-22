@@ -9,7 +9,6 @@ use rmcp::{
 };
 use sysinfo::System;
 
-
 #[derive(Debug, Clone)]
 struct McpSys;
 
@@ -35,27 +34,34 @@ impl McpSys {
         ]
     }
 
-    fn system_stats() -> String {
+    fn system_stats() -> anyhow::Result<String> {
         let mut sys = System::new_all();
         sys.refresh_all();
 
+        let cpu_count = sys.cpus().len();
+        // Avoid division by zero if no CPUs detected
+        anyhow::ensure!(cpu_count > 0, "No CPUs detected by sysinfo");
+
         let cpu_usage: f32 = sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>()
-            / sys.cpus().len() as f32;
+            / cpu_count as f32;
 
         let total_ram_mb = sys.total_memory() / 1024 / 1024;
         let used_ram_mb  = sys.used_memory()  / 1024 / 1024;
         let ram_percent  = (used_ram_mb as f64 / total_ram_mb as f64) * 100.0;
 
-        format!(
+        Ok(format!(
             "System Stats:\nCPU Usage:  {cpu_usage:.1}%\nRAM Usage:  {used_ram_mb} MB / {total_ram_mb} MB ({ram_percent:.1}%)\n"
-        )
+        ))
     }
 
-    fn list_processes() -> String {
+    fn list_processes() -> anyhow::Result<String> {
         let mut sys = System::new_all();
         sys.refresh_all();
 
         let mut processes: Vec<_> = sys.processes().values().collect();
+        // Ensure there are processes to list
+        anyhow::ensure!(!processes.is_empty(), "No processes found — sysinfo returned empty list");
+
         processes.sort_by(|a, b| b.memory().cmp(&a.memory()));
 
         let mut lines = vec!["Processes (sorted by RAM):".to_string()];
@@ -68,65 +74,68 @@ impl McpSys {
                 proc.memory() / 1024 / 1024,
             ));
         }
-        lines.join("\n")
+
+        Ok(lines.join("\n"))
     }
 
-    fn list_ports() -> String {
-    use std::process::Command;
+    fn list_ports() -> anyhow::Result<String> {
+        use std::process::Command;
+        use anyhow::Context;
 
-    // Load process table once to resolve PID → process name
-    let mut sys = System::new_all();
-    sys.refresh_all();
+        let mut sys = System::new_all();
+        sys.refresh_all();
 
-    let output = Command::new("netstat").args(["-ano"]).output();
+        // Run netstat and capture output
+        let output = Command::new("netstat")
+            .args(["-ano"])
+            .output()
+            .context("Failed to execute netstat — is it available in PATH?")?;
 
-    match output {
-        Err(e) => format!("Error running netstat: {e}"),
-        Ok(out) => {
-            let raw = String::from_utf8_lossy(&out.stdout);
-            let mut lines = vec!["Listening ports:".to_string()];
+        anyhow::ensure!(
+            output.status.success(),
+            "netstat exited with status: {}",
+            output.status
+        );
 
-            for line in raw.lines() {
-                if !line.contains("LISTENING") {
-                    continue;
-                }
+        let raw = String::from_utf8_lossy(&output.stdout);
+        let mut lines = vec!["Listening ports:".to_string()];
 
-                // netstat -ano columns: Proto  Local  Foreign  State  PID
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() < 5 {
-                    continue;
-                }
-
-                let proto        = parts[0];
-                let local_addr   = parts[1];
-                let pid_str      = parts[4];
-                let pid_num: u32 = pid_str.parse().unwrap_or(0);
-
-                // Extract just the port from "address:port"
-                let port = local_addr
-                    .rsplit(':')
-                    .next()
-                    .unwrap_or(local_addr);
-
-                // Resolve PID → process name via sysinfo
-                let pid = sysinfo::Pid::from_u32(pid_num);
-let proc_name = sys.process(pid)
-    .map(|p: &sysinfo::Process| p.name().to_string_lossy().into_owned())
-    .unwrap_or_else(|| "unknown".to_string());
-
-                lines.push(format!(
-                    "  {proto:<4}  :{port:<6}  {proc_name}  (PID {pid_num})"
-                ));
+        for line in raw.lines() {
+            if !line.contains("LISTENING") {
+                continue;
             }
 
-            if lines.len() == 1 {
-                lines.push("  No LISTENING ports found.".to_string());
+            // netstat -ano columns: Proto  Local  Foreign  State  PID
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 5 {
+                continue;
             }
 
-            lines.join("\n")
+            let proto        = parts[0];
+            let local_addr   = parts[1];
+            let pid_str      = parts[4];
+            let pid_num: u32 = pid_str.parse().unwrap_or(0);
+
+            // Extract just the port from "address:port"
+            let port = local_addr.rsplit(':').next().unwrap_or(local_addr);
+
+            // Resolve PID → process name via sysinfo
+            let pid = sysinfo::Pid::from_u32(pid_num);
+            let proc_name = sys.process(pid)
+                .map(|p: &sysinfo::Process| p.name().to_string_lossy().into_owned())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            lines.push(format!(
+                "  {proto:<4}  :{port:<6}  {proc_name}  (PID {pid_num})"
+            ));
         }
+
+        if lines.len() == 1 {
+            lines.push("  No LISTENING ports found.".to_string());
+        }
+
+        Ok(lines.join("\n"))
     }
-}
 }
 
 impl ServerHandler for McpSys {
@@ -161,12 +170,20 @@ impl ServerHandler for McpSys {
         request: CallToolRequestParams,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let text = match request.name.as_ref() {
+        // Run the tool and convert any anyhow error into a readable message for Claude
+        let result = match request.name.as_ref() {
             "system_stats"   => Self::system_stats(),
             "list_processes" => Self::list_processes(),
             "list_ports"     => Self::list_ports(),
-            other => format!("Unknown tool: {other}"),
+            other => Err(anyhow::anyhow!("Unknown tool: {other}")),
         };
+
+        let text = match result {
+            Ok(output) => output,
+            // Error is human-readable so Claude can explain what went wrong
+            Err(e) => format!("❌ Error: {e:#}"),
+        };
+
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 }
@@ -187,7 +204,6 @@ async fn main() -> anyhow::Result<()> {
     server.waiting().await?;
 
     eprintln!("server shut down cleanly");
-
 
     Ok(())
 }
