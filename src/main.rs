@@ -72,25 +72,61 @@ impl McpSys {
     }
 
     fn list_ports() -> String {
-        use std::process::Command;
-        let output = Command::new("netstat").args(["-ano"]).output();
-        match output {
-            Err(e) => format!("Error running netstat: {e}"),
-            Ok(out) => {
-                let raw = String::from_utf8_lossy(&out.stdout);
-                let mut lines = vec!["Listening ports:".to_string()];
-                for line in raw.lines() {
-                    if line.contains("LISTENING") {
-                        lines.push(format!("  {}", line.trim()));
-                    }
+    use std::process::Command;
+
+    // Load process table once to resolve PID → process name
+    let mut sys = System::new_all();
+    sys.refresh_all();
+
+    let output = Command::new("netstat").args(["-ano"]).output();
+
+    match output {
+        Err(e) => format!("Error running netstat: {e}"),
+        Ok(out) => {
+            let raw = String::from_utf8_lossy(&out.stdout);
+            let mut lines = vec!["Listening ports:".to_string()];
+
+            for line in raw.lines() {
+                if !line.contains("LISTENING") {
+                    continue;
                 }
-                if lines.len() == 1 {
-                    lines.push("  No LISTENING ports found.".to_string());
+
+                // netstat -ano columns: Proto  Local  Foreign  State  PID
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() < 5 {
+                    continue;
                 }
-                lines.join("\n")
+
+                let proto        = parts[0];
+                let local_addr   = parts[1];
+                let pid_str      = parts[4];
+                let pid_num: u32 = pid_str.parse().unwrap_or(0);
+
+                // Extract just the port from "address:port"
+                let port = local_addr
+                    .rsplit(':')
+                    .next()
+                    .unwrap_or(local_addr);
+
+                // Resolve PID → process name via sysinfo
+                let pid = sysinfo::Pid::from_u32(pid_num);
+let proc_name = sys.process(pid)
+    .map(|p: &sysinfo::Process| p.name().to_string_lossy().into_owned())
+    .unwrap_or_else(|| "unknown".to_string());
+
+                lines.push(format!(
+                    "  {proto:<4}  :{port:<6}  {proc_name}  (PID {pid_num})"
+                ));
             }
+
+            if lines.len() == 1 {
+                lines.push("  No LISTENING ports found.".to_string());
+            }
+
+            lines.join("\n")
         }
     }
+}
 }
 
 impl ServerHandler for McpSys {
@@ -151,6 +187,7 @@ async fn main() -> anyhow::Result<()> {
     server.waiting().await?;
 
     eprintln!("server shut down cleanly");
+
 
     Ok(())
 }
