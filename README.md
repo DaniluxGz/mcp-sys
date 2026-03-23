@@ -68,6 +68,10 @@ Add this to your MCP client config:
 
 Works with Claude Desktop, Claude Code, Cursor, Windsurf, Continue.dev and more.
 
+> ⚠️ **Windows note:** Windows may flag the binary on first run.
+> Click **"More info" → "Run anyway"** to proceed.
+> This is expected for unsigned open-source binaries.
+
 ---
 
 ## Tools
