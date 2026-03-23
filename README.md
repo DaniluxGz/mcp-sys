@@ -14,7 +14,7 @@ A Rust MCP server that exposes live CPU, RAM, processes and ports to any AI agen
 ## Demo
 
 <p align="center">
-  <img src="assets/demo-v0.1.0.gif"alt="mcp-sys demo" width="700"/>
+  <img src="assets/demo-v0.1.0.gif" alt="mcp-sys demo" width="700"/>
 </p>
 
 ## What it does
@@ -35,6 +35,13 @@ Claude calls mcp-sys →
 > **Why this matters for agentic AI:** When an AI agent executes code directly on your machine, it needs real system context to act safely. mcp-sys provides that context — preventing blind decisions that could affect running processes, occupied ports, or an overloaded system.
 
 ---
+
+## Why Rust?
+
+- **Single binary** — one `.exe`, no runtime, no dependencies to install
+- **Native performance** — reads CPU, RAM and ports with minimal overhead
+- **Memory safe** — no crashes, no leaks, runs quietly in the background
+- **Cross-platform core** — Windows today, Linux and macOS ready for v0.3
 
 ## Installation
 
